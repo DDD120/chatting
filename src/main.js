@@ -1,3 +1,5 @@
+require("dotenv").config();
+
 const Koa = require("koa");
 const path = require("path");
 const Pug = require("koa-pug");
@@ -5,6 +7,7 @@ const route = require("koa-route");
 const serve = require("koa-static");
 const websockify = require("koa-websocket");
 const mount = require("koa-mount");
+const mongoClient = require("./mongo");
 
 const app = websockify(new Koa());
 
@@ -19,17 +22,46 @@ app.use(async (ctx) => {
   await ctx.render("main");
 });
 
-// Using routes
+const _client = mongoClient.connect();
+
+async function getChatsCollection() {
+  const client = await _client;
+  return client.db("chat").collection("chats");
+}
+
 app.ws.use(
-  route.all("/ws", (ctx) => {
-    // `ctx` is the regular koa context created from the `ws` onConnection `socket.upgradeReq` object.
-    // the websocket is added to the context on `ctx.websocket`.
-    ctx.websocket.on("message", (data) => {
-      // do something with the message from client
+  route.all("/ws", async (ctx) => {
+    const chatsCollection = await getChatsCollection();
+    const chatsCursor = chatsCollection.find(
+      {},
+      {
+        sort: {
+          createdAt: 1,
+        },
+      }
+    );
+
+    const chats = await chatsCursor.toArray();
+    ctx.websocket.send(
+      JSON.stringify({
+        type: "sync",
+        payload: {
+          chats,
+        },
+      })
+    );
+
+    ctx.websocket.on("message", async (data) => {
       if (typeof data !== "string") {
         return;
       }
-      const { message, nickname } = JSON.parse(data);
+      const chat = JSON.parse(data);
+      await chatsCollection.insertOne({
+        ...chat,
+        createdAt: new Date(),
+      });
+
+      const { nickname, message } = chat;
 
       const { server } = app.ws;
 
@@ -40,8 +72,11 @@ app.ws.use(
       server.clients.forEach((client) => {
         client.send(
           JSON.stringify({
-            message,
-            nickname,
+            type: "chat",
+            payload: {
+              message,
+              nickname,
+            },
           })
         );
       });
